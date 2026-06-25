@@ -1,9 +1,12 @@
+import os
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from temporalio.client import Client
 
+from app.config import get_settings
 from app.middleware.auth import get_customer
 from app.models.db import Customer, Job
 from app.models.schemas import (
@@ -14,6 +17,14 @@ from app.models.schemas import (
 from app.services.db import get_session
 
 router = APIRouter(tags=["classifiers"])
+settings = get_settings()
+
+
+async def _get_temporal_client():
+    return await Client.connect(
+        settings.temporal_host,
+        namespace=settings.temporal_namespace,
+    )
 
 
 @router.post("/classifiers", response_model=ClassifyResponse)
@@ -35,9 +46,30 @@ async def start_classification(
     session.add(job)
     await session.commit()
 
+    try:
+        client = await _get_temporal_client()
+        handle = await client.start_workflow(
+            "ClassifyWorkflow",
+            {
+                "customer_id": str(customer.id),
+                "file_ids": request.file_ids,
+                "task": request.task,
+                "parameters": request.parameters,
+            },
+            id=f"temporal-{display_id}",
+            task_queue="tostal-task-queue",
+        )
+        job.temporal_workflow_id = handle.id
+        job.status = "processing"
+        await session.commit()
+    except Exception as e:
+        job.status = "failed"
+        job.error_message = f"Temporal dispatch failed: {str(e)}"
+        await session.commit()
+
     return ClassifyResponse(
         job_id=display_id,
-        status="pending",
+        status=job.status,
         estimated_completion=None,
     )
 

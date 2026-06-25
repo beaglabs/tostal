@@ -1,15 +1,26 @@
+import os
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from temporalio.client import Client
 
+from app.config import get_settings
 from app.middleware.auth import get_customer
 from app.models.db import Customer, Job
 from app.models.schemas import KrigingRequest, KrigingResponse
 from app.services.db import get_session
 
 router = APIRouter(tags=["krigging"])
+settings = get_settings()
+
+
+async def _get_temporal_client():
+    return await Client.connect(
+        settings.temporal_host,
+        namespace=settings.temporal_namespace,
+    )
 
 
 @router.post("/krigging", response_model=KrigingResponse)
@@ -31,9 +42,33 @@ async def start_kriging(
     session.add(job)
     await session.commit()
 
+    try:
+        client = await _get_temporal_client()
+        handle = await client.start_workflow(
+            "KrigeWorkflow",
+            {
+                "customer_id": str(customer.id),
+                "observations": {
+                    "file_ids": request.observations.file_ids,
+                    "variables": request.observations.variables,
+                },
+                "grid": request.grid.model_dump(),
+                "method": request.method,
+            },
+            id=f"temporal-{display_id}",
+            task_queue="tostal-task-queue",
+        )
+        job.temporal_workflow_id = handle.id
+        job.status = "processing"
+        await session.commit()
+    except Exception as e:
+        job.status = "failed"
+        job.error_message = f"Temporal dispatch failed: {str(e)}"
+        await session.commit()
+
     return KrigingResponse(
         job_id=display_id,
-        status="pending",
+        status=job.status,
     )
 
 

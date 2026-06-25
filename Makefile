@@ -1,4 +1,4 @@
-.PHONY: dev dev-api dev-gateway build test lint typecheck clean migrate
+.PHONY: dev dev-api dev-gateway build test lint typecheck clean migrate train-facies train-segmenter evaluate
 
 dev: dev-api dev-gateway
 
@@ -41,3 +41,12 @@ docker-up:
 
 docker-down:
 	docker compose down
+
+train-facies:
+	python training/scripts/train_xgboost_facies.py
+
+train-segmenter:
+	python training/scripts/train_segmenter.py
+
+evaluate:
+	python training/scripts/evaluate.py
