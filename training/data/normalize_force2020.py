@@ -247,8 +247,14 @@ def process_force2020(
     cache = download_force2020(cache_dir)
     las_zip = cache / "force2020_las.zip"
     las_dir = cache / "las"
-    if not las_dir.exists():
+    las_files = list(las_dir.rglob("*.las")) + list(las_dir.rglob("*.LAS")) if las_dir.exists() else []
+    if not las_files:
+        if las_dir.exists():
+            import shutil
+            print("Cleaning stale LAS extraction...")
+            shutil.rmtree(las_dir)
         print("Extracting LAS files...")
+        las_dir.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(las_zip, "r") as zf:
             zf.extractall(las_dir)
 
