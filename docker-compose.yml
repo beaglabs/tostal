@@ -1,0 +1,74 @@
+version: "3.9"
+
+services:
+  gateway:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    env_file: .env
+    depends_on:
+      - api
+
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "5173:5173"
+    env_file: .env
+    depends_on:
+      - api
+
+  postgres:
+    image: pgvector/pgvector:pg17
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: tostal
+      POSTGRES_PASSWORD: tostal_dev
+      POSTGRES_DB: tostal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tostal"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  temporal:
+    image: temporalio/auto-setup:latest
+    ports:
+      - "7233:7233"
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: tostal
+      POSTGRES_PWD: tostal_dev
+      POSTGRES_SEEDS: postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  temporal-worker:
+    build:
+      context: ./workflows
+      dockerfile: Dockerfile
+    env_file: .env
+    depends_on:
+      - temporal
+
+volumes:
+  postgres_data:
