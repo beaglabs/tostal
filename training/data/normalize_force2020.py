@@ -71,9 +71,9 @@ def parse_las_files(las_dir, n_depth=512, n_curves=6):
     if lasio is None:
         raise ImportError("lasio required: pip install lasio")
     las_dir = Path(las_dir)
-    las_paths = sorted(las_dir.glob("*.las")) + sorted(las_dir.glob("*.LAS"))
+    las_paths = sorted(las_dir.rglob("*.las")) + sorted(las_dir.rglob("*.LAS"))
     if not las_paths:
-        raise FileNotFoundError(f"No LAS files found in {las_dir}")
+        raise FileNotFoundError(f"No LAS files found recursively in {las_dir}")
 
     wells = {}
     for las_path in las_paths:
@@ -260,7 +260,11 @@ def process_force2020(
 
     train_las_dir = las_dir / "train"
     if not train_las_dir.exists():
-        train_las_dir = las_dir
+        las_dirs = [p.parent for p in sorted(las_dir.rglob("*.las")) + sorted(las_dir.rglob("*.LAS"))]
+        if las_dirs and las_dirs[0].exists():
+            train_las_dir = las_dirs[0]
+        else:
+            train_las_dir = las_dir
 
     print(f"Parsing LAS files from {train_las_dir}...")
     wells = parse_las_files(train_las_dir, n_depth=n_depth, n_curves=n_curves)
