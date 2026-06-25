@@ -53,7 +53,7 @@ def _download(url, dest, desc="downloading"):
 def _match_curve(las_file, target):
     candidates = CURVE_ALIASES[target]
     for c in candidates:
-        if c in las_file:
+        if c in las_file.keys():
             return las_file[c].data
     return None
 
