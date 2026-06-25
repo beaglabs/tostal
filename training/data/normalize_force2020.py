@@ -303,3 +303,50 @@ def process_force2020(
     torch.save(wells, processed_path)
     print(f"Saved {len(wells)} processed wells to {processed_path}")
     return wells
+
+
+def build_spatial_features(curves, n_depth, window=5):
+    """Build spatial features from well log curves for facies classification.
+
+    Computes per-depth-point features that capture geological context:
+    - Original 6 curve values
+    - Normalized depth position
+    - Rolling-window mean per curve (captures formation-scale trends)
+    - Rolling-window std per curve (captures bed boundaries)
+    - Neighboring depth values (t-1, t+1) per curve (local continuity)
+
+    Args:
+        curves: (n_curves, n_depth) numpy array
+        n_depth: number of depth points
+        window: rolling window size (default 5)
+
+    Returns:
+        X: (n_depth, n_features) numpy array
+    """
+    n_curves = curves.shape[0]
+    half = window // 2
+    features = []
+
+    for d in range(n_depth):
+        f = []
+
+        for c in range(n_curves):
+            f.append(float(curves[c, d]))
+
+        f.append(d / max(n_depth - 1, 1))
+
+        lo = max(0, d - half)
+        hi = min(n_depth, d + half + 1)
+        for c in range(n_curves):
+            f.append(float(np.nanmean(curves[c, lo:hi])))
+        for c in range(n_curves):
+            f.append(float(np.nanstd(curves[c, lo:hi])))
+
+        for c in range(n_curves):
+            f.append(float(curves[c, max(0, d - 1)]))
+        for c in range(n_curves):
+            f.append(float(curves[c, min(n_depth - 1, d + 1)]))
+
+        features.append(f)
+
+    return np.array(features, dtype=np.float32)
