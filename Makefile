@@ -1,4 +1,4 @@
-.PHONY: dev dev-api dev-gateway build test lint typecheck clean migrate train-facies train-dino train-segmenter evaluate
+.PHONY: dev dev-api dev-gateway build test lint typecheck clean migrate setup train-facies train-dino train-segmenter evaluate
 
 dev: dev-api dev-gateway
 
@@ -41,6 +41,9 @@ docker-up:
 
 docker-down:
 	docker compose down
+
+setup:
+	pip install -e training/
 
 train-facies:
 	python training/scripts/train_xgboost_facies.py
