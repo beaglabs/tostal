@@ -99,6 +99,8 @@ def parse_las_files(las_dir, n_depth=512, n_curves=6):
 
         for i, key in enumerate(["GR", "RT", "RHOB", "NPHI", "DT", "CALI"]):
             data = _match_curve(las, key)
+            if data is not None:
+                data = np.asarray(data, dtype=np.float32)
             if data is not None and len(data) == len(depths):
                 valid = ~np.isnan(data)
                 if valid.sum() > 10:
