@@ -1,4 +1,5 @@
 import os
+import shutil
 import zipfile
 import hashlib
 import urllib.request
@@ -250,13 +251,26 @@ def process_force2020(
     las_files = list(las_dir.rglob("*.las")) + list(las_dir.rglob("*.LAS")) if las_dir.exists() else []
     if not las_files:
         if las_dir.exists():
-            import shutil
-            print("Cleaning stale LAS extraction...")
             shutil.rmtree(las_dir)
         print("Extracting LAS files...")
         las_dir.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(las_zip, "r") as zf:
             zf.extractall(las_dir)
+
+        # Flatten wrapper directory if zip has a top-level folder
+        children = list(las_dir.iterdir())
+        wrapper = None
+        for child in children:
+            if child.is_dir() and (child / "train").exists():
+                wrapper = child
+                break
+        if wrapper:
+            print(f"  Flattening wrapper directory {wrapper.name}")
+            for item in wrapper.iterdir():
+                target = las_dir / item.name
+                if not target.exists():
+                    shutil.move(str(item), str(target))
+            shutil.rmtree(wrapper)
 
     train_las_dir = las_dir / "train"
     if not train_las_dir.exists():
