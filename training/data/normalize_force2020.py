@@ -34,10 +34,25 @@ CURVE_ALIASES = {
 }
 
 FACIES_CLASSES = [
-    "Sandstone", "Shale", "Marl", "Limestone", "Dolostone",
-    "Siltstone", "Chalk", "Volcanic", "Coal", "Conglomerate",
-    "Anhydrite", "Salt",
+    "Sandstone", "Sandstone/Shale", "Shale", "Marl", "Dolomite",
+    "Limestone", "Chalk", "Halite", "Anhydrite", "Tuff",
+    "Coal", "Basement",
 ]
+
+FORCE_LITHOLOGY_CODE_TO_IDX = {
+    30000: 0,   # Sandstone
+    65030: 1,   # Sandstone/Shale
+    65000: 2,   # Shale
+    80000: 3,   # Marl
+    74000: 4,   # Dolomite
+    70000: 5,   # Limestone
+    70032: 6,   # Chalk
+    88000: 7,   # Halite
+    86000: 8,   # Anhydrite
+    99000: 9,   # Tuff
+    90000: 10,  # Coal
+    93000: 11,  # Basement
+}
 
 
 def _download(url, dest, desc="downloading"):
@@ -117,6 +132,8 @@ def parse_las_files(las_dir, n_depth=512, n_curves=6):
         curve_data = (curve_data - mean) / std
         curve_data[:, ~valid_mask] = 0
 
+        facies = _read_lithology_from_las(las, depths, n_depth)
+
         wells[well_name] = {
             "well_log": torch.from_numpy(curve_data),
             "metadata": {
@@ -124,7 +141,28 @@ def parse_las_files(las_dir, n_depth=512, n_curves=6):
                 "basin": "Norwegian Sea",
             },
         }
+        if facies is not None:
+            wells[well_name]["facies"] = torch.from_numpy(facies)
     return wells
+
+
+def _read_lithology_from_las(las, depths, n_depth):
+    lith_candidates = ["FORCE_2020_LITHOFACIES_LITHOLOGY", "LITH", "LITHOLOGY", "FACIES"]
+    for name in lith_candidates:
+        if name in las.keys():
+            raw = np.asarray(las[name].data, dtype=np.float32)
+            class_idx = np.full(len(raw), -1, dtype=np.int64)
+            for code, idx in FORCE_LITHOLOGY_CODE_TO_IDX.items():
+                class_idx[np.isclose(raw, float(code), atol=1.0)] = idx
+            src_x = np.arange(len(class_idx))
+            target_x = np.linspace(0, len(class_idx) - 1, n_depth)
+            labels = np.full(n_depth, -1, dtype=np.int64)
+            for j in range(n_depth):
+                nearest = int(round(target_x[j]))
+                nearest = min(max(nearest, 0), len(class_idx) - 1)
+                labels[j] = class_idx[nearest]
+            return labels
+    return None
 
 
 def load_lithology_labels(xlsx_path, wells, n_depth=512):
@@ -287,11 +325,11 @@ def process_force2020(
     print(f"  Parsed {len(wells)} wells")
 
     litho_path = cache / "lithology_scoring.xlsx"
-    if litho_path.exists():
-        print("Loading lithology labels...")
-        load_lithology_labels(litho_path, wells, n_depth=n_depth)
-        labeled = sum(1 for w in wells.values() if "facies" in w)
-        print(f"  Applied labels to {labeled} wells")
+    if not litho_path.exists():
+        _download(LITHOLOGY_URL, litho_path, "lithology labels")
+
+    labeled = sum(1 for w in wells.values() if "facies" in w)
+    print(f"  Loaded lithology labels from LAS files for {labeled} wells")
 
     npd_litho = cache / "npd_lithostratigraphy.xlsx"
     if not npd_litho.exists():

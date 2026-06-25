@@ -56,6 +56,11 @@ def main():
     print("Loading FORCE 2020 data...")
     wells = process_force2020(cache_dir="data/force2020")
     X, y = build_dataset(wells)
+    if len(X) == 0:
+        raise RuntimeError(
+            "No labeled depth points found. Check that LAS files contain "
+            "FORCE_2020_LITHOFACIES_LITHOLOGY curve data."
+        )
     n_features = X.shape[1]
     print(f"  {X.shape[0]} labeled depth points, {X.shape[1]} features ({n_features - 6} spatial)")
     print(f"  Classes: {np.unique(y)}")

@@ -18,9 +18,9 @@ _FEATURE_NAMES = None
 _WINDOW = 5
 
 FACIES_CLASSES = [
-    "Sandstone", "Shale", "Marl", "Limestone", "Dolostone",
-    "Siltstone", "Chalk", "Volcanic", "Coal", "Conglomerate",
-    "Anhydrite", "Salt",
+    "Sandstone", "Sandstone/Shale", "Shale", "Marl", "Dolomite",
+    "Limestone", "Chalk", "Halite", "Anhydrite", "Tuff",
+    "Coal", "Basement",
 ]
 
 CURVE_NAMES = ["GR", "RT", "RHOB", "NPHI", "DT", "CALI"]
