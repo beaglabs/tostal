@@ -13,6 +13,8 @@ dependencies = [
     "torchvision",
     "tqdm",
     "datasets",
+    "mlcroissant",
+    "kagglehub",
 ]
 
 [build-system]

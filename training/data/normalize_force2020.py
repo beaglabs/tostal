@@ -214,6 +214,37 @@ def load_lithology_labels(xlsx_path, wells, n_depth=512):
         well["facies"][top_idx:base_idx] = label
 
 
+FORMATION_GROUPS = [
+    "NORDLAND GP.", "HORDALAND GP.", "ROGALAND GP.", "SHETLAND GP.",
+    "CROMER KNOLL GP.", "VIKING GP.", "VESTLAND GP.", "DUNLIN GP.",
+    "BAAT GP.", "HEGRE GP.", "TYNE GP.", "ZECHSTEIN GP.",
+    "ROTLIEGENDES GP.", "BOKNFJORD GP.",
+]
+
+FORMATION_GROUP_TO_IDX = {name: i for i, name in enumerate(FORMATION_GROUPS)}
+
+FORMATION_LITHOLOGY_PROXY = {
+    "NORDLAND GP.":       [2, 0],          # Shale, Sandstone
+    "HORDALAND GP.":      [2, 0],          # Shale, Sandstone
+    "ROGALAND GP.":       [2, 9],          # Shale, Tuff (Balder Fm.)
+    "SHETLAND GP.":       [6, 5, 3],       # Chalk, Limestone, Marl
+    "CROMER KNOLL GP.":   [3, 2, 5, 0],    # Marl, Shale, Limestone, Sandstone
+    "VIKING GP.":          [2, 0],          # Shale, Sandstone
+    "VESTLAND GP.":       [0, 2, 10],      # Sandstone, Shale, Coal (Ness Fm.)
+    "DUNLIN GP.":          [2, 0],          # Shale, Sandstone
+    "BAAT GP.":           [0, 2],          # Sandstone, Shale
+    "HEGRE GP.":           [0, 2],          # Sandstone, Shale
+    "TYNE GP.":           [0, 2],          # Sandstone, Shale
+    "ZECHSTEIN GP.":      [8, 7, 4, 5],    # Anhydrite, Halite, Dolomite, Limestone
+    "ROTLIEGENDES GP.":   [0, 9],          # Sandstone, Tuff
+    "BOKNFJORD GP.":      [0, 10],         # Sandstone, Coal
+}
+
+
+def _normalize_well_name(name):
+    return name.strip().replace("_", "/")
+
+
 def load_lithostratigraphy(xlsx_path, wells, n_depth=512):
     if openpyxl is None:
         return
@@ -225,31 +256,65 @@ def load_lithostratigraphy(xlsx_path, wells, n_depth=512):
 
     header = [str(c).strip().lower() if c else "" for c in rows[0]]
     name_col = next((i for i, h in enumerate(header) if "well" in h), None)
-    group_col = next((i for i, h in enumerate(header) if "group" in h), None)
-    top_col = next((i for i, h in enumerate(header) if "top" in h), None)
-    base_col = next((i for i, h in enumerate(header) if "base" in h), None)
+    surface_col = next((i for i, h in enumerate(header) if "surface" in h), None)
+    md_col = next((i for i, h in enumerate(header) if h == "md"), None)
+    horizon_col = next((i for i, h in enumerate(header) if "horizon" in h), None)
 
-    if None in (name_col, group_col):
+    if None in (name_col, md_col, horizon_col):
+        print(f"  Warning: could not identify stratigraphy columns. Header: {header}")
         return
 
+    well_index = {_normalize_well_name(k): k for k in wells}
+
+    formations_by_well = {}
     for row in rows[1:]:
         if not row or not row[name_col]:
             continue
-        well_name = str(row[name_col]).strip()
-        if well_name not in wells:
+        well_name_orig = str(row[name_col]).strip()
+        well_name = _normalize_well_name(well_name_orig)
+        if well_name not in well_index:
             continue
+        internal_name = well_index[well_name]
 
-        group = str(row[group_col]).strip() if row[group_col] else ""
         try:
-            top = float(row[top_col]) if top_col is not None and row[top_col] else 0
-            base = float(row[base_col]) if base_col is not None and row[base_col] else n_depth
+            md = float(row[md_col])
         except (ValueError, TypeError):
             continue
 
-        well = wells[well_name]
-        well.setdefault("formations", []).append({
-            "name": group, "top": top, "base": base,
+        horizon = str(row[horizon_col]).strip() if row[horizon_col] else ""
+        surface = str(row[surface_col]).strip() if surface_col is not None and row[surface_col] else ""
+
+        group = None
+        for g in FORMATION_GROUPS:
+            if g in horizon:
+                group = g
+                break
+
+        if group is None:
+            continue
+
+        formations_by_well.setdefault(internal_name, []).append({
+            "name": group, "md": md, "horizon": horizon,
         })
+
+    for well_name, entries in formations_by_well.items():
+        entries.sort(key=lambda e: e["md"])
+
+        for i, entry in enumerate(entries):
+            top = entry["md"]
+            base = entries[i + 1]["md"] if i + 1 < len(entries) else n_depth
+            entry["top"] = top
+            entry["base"] = base
+
+        well = wells[well_name]
+        well.setdefault("formations", entries)
+
+        well.setdefault("stratigraphy", torch.full((n_depth,), -1, dtype=torch.long))
+        for entry in entries:
+            top_idx = max(0, min(n_depth - 1, int(entry["top"] / n_depth * n_depth)))
+            base_idx = max(top_idx + 1, min(n_depth, int(entry["base"] / n_depth * n_depth)))
+            if entry["name"] in FORMATION_GROUP_TO_IDX:
+                well["stratigraphy"][top_idx:base_idx] = FORMATION_GROUP_TO_IDX[entry["name"]]
 
 
 def generate_geology_text_from_formations(well, depth_scale=1.0):
@@ -261,9 +326,9 @@ def generate_geology_text_from_formations(well, depth_scale=1.0):
     n_units = len(formations)
     descs = []
     for f in formations:
-        fname = f["name"]
-        top = int(f["top"] * depth_scale)
-        base = int(f["base"] * depth_scale)
+        fname = f.get("name", f.get("horizon", ""))
+        top = int(f.get("top", f.get("md", 0)) * depth_scale)
+        base = int(f.get("base", f.get("md", 0)) * depth_scale)
         descs.append(f"{fname} from {top} to {base}m")
 
     unit_descriptions = ". ".join(descs) + "."
@@ -339,6 +404,24 @@ def process_force2020(
         load_lithostratigraphy(npd_litho, wells, n_depth=n_depth)
         strat = sum(1 for w in wells.values() if "formations" in w)
         print(f"  Added stratigraphy to {strat} wells")
+
+        proxy = 0
+        for well_name, w in wells.items():
+            if "stratigraphy" not in w:
+                continue
+            group_labels = w["stratigraphy"].numpy()
+            proxy_facies = np.full(n_depth, -1, dtype=np.int64)
+            for d in range(n_depth):
+                g = int(group_labels[d])
+                if g < 0 or g >= len(FORMATION_GROUPS):
+                    continue
+                proxies = FORMATION_LITHOLOGY_PROXY.get(FORMATION_GROUPS[g], [])
+                if proxies:
+                    proxy_facies[d] = proxies[0]
+            if (proxy_facies >= 0).sum() > 0:
+                w.setdefault("formation_proxy_facies", torch.from_numpy(proxy_facies))
+                proxy += 1
+        print(f"  Generated formation-proxy lithology labels for {proxy} wells")
 
     torch.save(wells, processed_path)
     print(f"Saved {len(wells)} processed wells to {processed_path}")
