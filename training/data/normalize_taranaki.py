@@ -1,100 +1,168 @@
-import os
+import csv
 import shutil
 import tarfile
 import urllib.request
+from collections import defaultdict
 from pathlib import Path
-from typing import Optional
-import warnings
 
 import numpy as np
 import torch
 
-from .normalize_force2020 import (
-    FACIES_CLASSES,
-    CURVE_ALIASES,
-    _download,
-    _match_curve,
-    _normalize_well_name,
+from .normalize_force2020 import FACIES_CLASSES, _download
+
+TARANAKI_URL = (
+    "https://zenodo.org/records/3832955/files/"
+    "taranaki-basin-curated-well-logs.tar.gz?download=1"
 )
 
-try:
-    import lasio
-except ImportError:
-    lasio = None
+CURVE_COLUMNS = {
+    "GR": "GR",
+    "RT": "RESD",
+    "RHOB": "DENS",
+    "NPHI": "NEUT",
+    "DT": "DTC",
+    "CALI": "CALI",
+}
 
-try:
-    import openpyxl
-except ImportError:
-    openpyxl = None
-
-TARANAKI_URL = "https://zenodo.org/records/3832955/files/taranaki-basin-curated-well-logs.tar.gz?download=1"
-
-
-def _flatten_nested_las(root: Path):
-    """Recursively move LAS files from nested dirs up to root, removing empties."""
-    las_files = list(root.rglob("*.las")) + list(root.rglob("*.LAS"))
-    if not las_files:
-        return
-    for las in las_files:
-        if las.parent == root:
-            continue
-        target = root / las.name
-        if not target.exists():
-            shutil.move(str(las), str(target))
-    for d in sorted(root.rglob("*"), reverse=True):
-        if d.is_dir() and d != root and not any(d.iterdir()):
-            d.rmdir()
-    remaining = list(root.rglob("*.las")) + list(root.rglob("*.LAS"))
-    print(f"  Flattened: {len(remaining)} LAS files in {root}")
+TARANAKI_FORMATION_LITHOLOGY = {
+    "Mangahewa": 0,        # sandstone
+    "McKee": 0,             # sandstone
+    "Kaimiro": 0,            # sandstone
+    "Farewell": 0,           # sandstone
+    "Pakawau": 0,            # sandstone
+    "North Cape": 0,         # sandstone
+    "Manganui": 2,           # shale/mudstone
+    "Otaraoa": 2,            # mudstone
+    "Turi": 2,               # mudstone/siltstone
+    "Wainui": 2,             # mudstone
+    "Mangaa": 2,             # mudstone
+    "Urenui": 1,             # siltstone/sandstone-shale
+    "Mount Messenger": 1,    # siltstone/sandstone interbeds
+    "Mohakatino": 9,         # volcaniclastic/tuff
+    "Tikorangi": 5,          # limestone
+    "Matapo": 5,             # limestone
+    "Ariki": 1,              # siltstone
+    "Rakopi": 0,             # sandstone + coal
+}
 
 
 def download_taranaki(cache_dir="data/taranaki"):
     cache = Path(cache_dir)
     cache.mkdir(parents=True, exist_ok=True)
-    las_archive = cache / "taranaki_basin_well_logs.tar.gz"
-    _download(TARANAKI_URL, las_archive, "Taranaki Basin LAS")
+    archive = cache / "taranaki_basin_well_logs.tar.gz"
+    _download(TARANAKI_URL, archive, "Taranaki Basin LAS")
     return cache
 
 
-def parse_taranaki_las_files(las_dir, n_depth=512, n_curves=6):
-    if lasio is None:
-        raise ImportError("lasio required: pip install lasio")
-    las_dir = Path(las_dir)
-    las_paths = sorted(las_dir.rglob("*.las")) + sorted(las_dir.rglob("*.LAS"))
-    if not las_paths:
-        raise FileNotFoundError(f"No LAS files found recursively in {las_dir}")
+def _extract_archive(cache_dir):
+    cache = Path(cache_dir)
+    archive = cache / "taranaki_basin_well_logs.tar.gz"
+    extract_dir = cache / "extracted"
+
+    csv_path = extract_dir / "logs.csv"
+    if csv_path.exists():
+        return extract_dir
+
+    if extract_dir.exists():
+        shutil.rmtree(extract_dir)
+    extract_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        with tarfile.open(archive, "r:*") as tf:
+            tf.extractall(extract_dir)
+    except tarfile.ReadError:
+        archive.unlink()
+        cache = download_taranaki(cache_dir)
+        archive = cache / "taranaki_basin_well_logs.tar.gz"
+        with tarfile.open(archive, "r:*") as tf:
+            tf.extractall(extract_dir)
+
+    wrapper = None
+    for item in extract_dir.iterdir():
+        if item.is_dir():
+            csv_in_wrapper = item / "logs.csv"
+            if csv_in_wrapper.exists():
+                wrapper = item
+                break
+
+    if wrapper:
+        for item in wrapper.iterdir():
+            target = extract_dir / item.name
+            if not target.exists():
+                shutil.move(str(item), str(target))
+        shutil.rmtree(wrapper)
+
+    return extract_dir
+
+
+def _resolve_lithology_label(formation_name):
+    if not formation_name or not formation_name.strip():
+        return -1
+    name = formation_name.strip()
+    if name in TARANAKI_FORMATION_LITHOLOGY:
+        return int(TARANAKI_FORMATION_LITHOLOGY[name])
+    return -1
+
+
+def parse_taranaki_csv(extract_dir, n_depth=512, n_curves=6, max_wells=None):
+    csv_path = Path(extract_dir) / "logs.csv"
+    if not csv_path.exists():
+        raise FileNotFoundError(f"logs.csv not found in {extract_dir}")
+
+    curve_keys = ["GR", "RT", "RHOB", "NPHI", "DT", "CALI"]
+
+    print(f"  Reading {csv_path}...")
+    well_data = defaultdict(lambda: {"depths": [], "curves": {k: [] for k in curve_keys}, "formations": []})
+
+    with open(csv_path, "r", encoding="utf-8", errors="replace") as fh:
+        reader = csv.DictReader(fh)
+        for row in reader:
+            well_name = row.get("WELLNAME", "").strip()
+            if not well_name:
+                continue
+            if max_wells and len(well_data) > max_wells and well_name not in well_data:
+                continue
+
+            try:
+                depth = float(row.get("DEPT", ""))
+            except (ValueError, TypeError):
+                continue
+
+            w = well_data[well_name]
+            w["depths"].append(depth)
+            for std_key, csv_col in CURVE_COLUMNS.items():
+                try:
+                    val = float(row.get(csv_col, ""))
+                except (ValueError, TypeError):
+                    val = float("nan")
+                w["curves"][std_key].append(val)
+            w["formations"].append(row.get("FORMATION", ""))
+
+    print(f"  Loaded {len(well_data)} wells from CSV")
 
     wells = {}
-    for las_path in las_paths:
-        well_name = las_path.stem
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            las = lasio.read(las_path)
-
-        curve_data = np.zeros((n_curves, n_depth), dtype=np.float32)
-        depths = None
-        for i, key in enumerate(["GR", "RT", "RHOB", "NPHI", "DT", "CALI"]):
-            data = _match_curve(las, key)
-            if data is not None:
-                if depths is None:
-                    if las.index is not None:
-                        depths = las.index
-                    else:
-                        depths = data
-
-        if depths is None:
+    for well_name, data in well_data.items():
+        if len(data["depths"]) < 10:
             continue
 
-        for i, key in enumerate(["GR", "RT", "RHOB", "NPHI", "DT", "CALI"]):
-            data = _match_curve(las, key)
-            if data is not None:
-                data = np.asarray(data, dtype=np.float32)
-            if data is not None and len(data) == len(depths):
-                valid = ~np.isnan(data)
-                if valid.sum() > 10:
-                    data[~valid] = np.nanmean(data[valid]) if valid.any() else 0
-                    f = np.linspace(0, len(data) - 1, n_depth)
-                    curve_data[i] = np.interp(f, np.arange(len(data)), data)
+        depths = np.array(data["depths"], dtype=np.float32)
+        sort_idx = np.argsort(depths)
+        depths = depths[sort_idx]
+
+        curve_data = np.zeros((n_curves, n_depth), dtype=np.float32)
+        curves_ok = 0
+        for i, key in enumerate(curve_keys):
+            raw = np.array(data["curves"][key], dtype=np.float32)[sort_idx]
+            valid = ~np.isnan(raw)
+            if valid.sum() < 10:
+                continue
+            raw[~valid] = np.nanmean(raw[valid])
+            f = np.linspace(0, len(raw) - 1, n_depth)
+            curve_data[i] = np.interp(f, np.arange(len(raw)), raw)
+            curves_ok += 1
+
+        if curves_ok < 3:
+            continue
 
         valid_mask = curve_data.sum(axis=0) != 0
         if valid_mask.sum() < n_depth * 0.1:
@@ -105,96 +173,36 @@ def parse_taranaki_las_files(las_dir, n_depth=512, n_curves=6):
         curve_data = (curve_data - mean) / std
         curve_data[:, ~valid_mask] = 0
 
-        facies = _read_taranaki_lithology(las, n_depth)
+        formations = [data["formations"][i] for i in sort_idx]
+        facies = np.full(n_depth, -1, dtype=np.int64)
+        formation_depth_map = {}
+        for j in range(len(depths)):
+            fm = formations[j].strip()
+            if fm:
+                formation_depth_map.setdefault(fm, []).append(depths[j])
+
+        for fm, fm_depths in formation_depth_map.items():
+            label = _resolve_lithology_label(fm)
+            if label < 0:
+                continue
+            fm_min, fm_max = min(fm_depths), max(fm_depths)
+            target_depths = np.linspace(depths[0], depths[-1], n_depth)
+            in_range = (target_depths >= fm_min) & (target_depths <= fm_max)
+            facies[in_range] = label
 
         wells[well_name] = {
             "well_log": torch.from_numpy(curve_data),
-            "metadata": {
-                "name": well_name,
-                "basin": "Taranaki Basin",
-            },
+            "metadata": {"name": well_name, "basin": "Taranaki Basin"},
         }
-        if facies is not None:
+        if (facies >= 0).sum() > 0:
             wells[well_name]["facies"] = torch.from_numpy(facies)
+
+    total_labeled = sum(1 for w in wells.values() if "facies" in w)
+    print(f"  Parsed {len(wells)} wells ({total_labeled} with formation-proxy labels)")
     return wells
 
 
-def _read_taranaki_lithology(las, n_depth):
-    lith_candidates = ["LITH", "LITHOLOGY", "FACIES", "FACIES_CLASS", "LABEL"]
-    facies_label_map = {
-        "sandstone": 0, "sand": 0,
-        "sandstoneshale": 1, "siltstone": 1, "silt": 1,
-        "shale": 2, "mudstone": 2, "claystone": 2,
-        "marl": 3, "calcareous shale": 3,
-        "dolomite": 4, "dolostone": 4,
-        "limestone": 5,
-        "chalk": 6,
-        "halite": 7, "salt": 7,
-        "anhydrite": 8,
-        "tuff": 9, "volcanic": 9, "volcaniclastic": 9,
-        "coal": 10, "lignite": 10,
-        "basement": 11, "igneous": 11, "granite": 11,
-    }
-
-    for name in lith_candidates:
-        if name in las.keys():
-            raw = np.asarray(las[name].data)
-            labels = np.full(n_depth, -1, dtype=np.int64)
-            src_x = np.arange(len(raw))
-            target_x = np.linspace(0, len(raw) - 1, n_depth)
-
-            if raw.dtype.kind in ("U", "S", "O"):
-                raw_str = np.array([str(v).strip().lower() for v in raw])
-                for j in range(n_depth):
-                    nearest = int(round(target_x[j]))
-                    nearest = min(max(nearest, 0), len(raw_str) - 1)
-                    val = raw_str[nearest]
-                    if val in facies_label_map:
-                        labels[j] = facies_label_map[val]
-            else:
-                raw = np.asarray(raw, dtype=np.float32)
-                class_idx = np.full(len(raw), -1, dtype=np.int64)
-                for code, idx in facies_label_map.items():
-                    if isinstance(code, str):
-                        continue
-                raw_int = raw.astype(np.int64)
-                unique_vals = np.unique(raw_int[~np.isnan(raw)])
-                for val in unique_vals:
-                    if val >= 0 and val < len(FACIES_CLASSES):
-                        class_idx[raw_int == val] = val
-                for j in range(n_depth):
-                    nearest = int(round(target_x[j]))
-                    nearest = min(max(nearest, 0), len(class_idx) - 1)
-                    labels[j] = class_idx[nearest]
-
-            if (labels >= 0).sum() > 0:
-                return labels
-
-    for name in lith_candidates:
-        if name in las.keys():
-            raw = np.asarray(las[name].data, dtype=np.float32)
-            labels = np.full(n_depth, -1, dtype=np.int64)
-            src_x = np.arange(len(raw))
-            target_x = np.linspace(0, len(raw) - 1, n_depth)
-            raw_int = raw.astype(np.int64)
-            for j in range(n_depth):
-                nearest = int(round(target_x[j]))
-                nearest = min(max(nearest, 0), len(raw_int) - 1)
-                val = raw_int[nearest]
-                if 0 <= val < len(FACIES_CLASSES):
-                    labels[j] = val
-            if (labels >= 0).sum() > 0:
-                return labels
-
-    return None
-
-
-def process_taranaki(
-    cache_dir="data/taranaki",
-    n_depth=512,
-    n_curves=6,
-    force_reprocess=False,
-):
+def process_taranaki(cache_dir="data/taranaki", n_depth=512, n_curves=6, force_reprocess=False):
     cache = Path(cache_dir)
     cache.mkdir(parents=True, exist_ok=True)
     processed_path = cache / "processed.pt"
@@ -203,39 +211,9 @@ def process_taranaki(
         print(f"Loading cached Taranaki data from {processed_path}")
         return torch.load(processed_path, weights_only=False)
 
-    cache = download_taranaki(cache_dir)
-    las_archive = cache / "taranaki_basin_well_logs.tar.gz"
-    las_dir = cache / "las"
-    las_files = list(las_dir.rglob("*.las")) + list(las_dir.rglob("*.LAS")) if las_dir.exists() else []
-    if not las_files:
-        if las_dir.exists():
-            shutil.rmtree(las_dir)
-        print("Extracting Taranaki LAS files...")
-        las_dir.mkdir(parents=True, exist_ok=True)
-
-        try:
-            with tarfile.open(las_archive, "r:*") as tf:
-                members = tf.getmembers()
-                las_members = [m for m in members if m.name.lower().endswith(".las")]
-                print(f"  Archive contains {len(members)} entries, {len(las_members)} LAS files")
-                if not las_members:
-                    print(f"  First 5 archive entries: {[m.name for m in members[:5]]}")
-                tf.extractall(las_dir)
-        except tarfile.ReadError:
-            print(f"  Invalid tar archive, re-downloading...")
-            las_archive.unlink()
-            cache = download_taranaki(cache_dir)
-            las_archive = cache / "taranaki_basin_well_logs.tar.gz"
-            with tarfile.open(las_archive, "r:*") as tf:
-                tf.extractall(las_dir)
-
-        _flatten_nested_las(las_dir)
-
-    print(f"Parsing Taranaki LAS files from {las_dir}...")
-    wells = parse_taranaki_las_files(las_dir, n_depth=n_depth, n_curves=n_curves)
-    print(f"  Parsed {len(wells)} wells")
-    labeled = sum(1 for w in wells.values() if "facies" in w)
-    print(f"  Loaded lithology labels for {labeled} wells")
+    download_taranaki(cache_dir)
+    extract_dir = _extract_archive(cache_dir)
+    wells = parse_taranaki_csv(extract_dir, n_depth=n_depth, n_curves=n_curves)
 
     torch.save(wells, processed_path)
     print(f"Saved {len(wells)} processed wells to {processed_path}")
