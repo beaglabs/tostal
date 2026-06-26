@@ -27,7 +27,25 @@ try:
 except ImportError:
     openpyxl = None
 
-TARANAKI_URL = "https://zenodo.org/records/3832955/files/taranaki-basin-curated-well-logs.tar.gz"
+TARANAKI_URL = "https://zenodo.org/records/3832955/files/taranaki-basin-curated-well-logs.tar.gz?download=1"
+
+
+def _flatten_nested_las(root: Path):
+    """Recursively move LAS files from nested dirs up to root, removing empties."""
+    las_files = list(root.rglob("*.las")) + list(root.rglob("*.LAS"))
+    if not las_files:
+        return
+    for las in las_files:
+        if las.parent == root:
+            continue
+        target = root / las.name
+        if not target.exists():
+            shutil.move(str(las), str(target))
+    for d in sorted(root.rglob("*"), reverse=True):
+        if d.is_dir() and d != root and not any(d.iterdir()):
+            d.rmdir()
+    remaining = list(root.rglob("*.las")) + list(root.rglob("*.LAS"))
+    print(f"  Flattened: {len(remaining)} LAS files in {root}")
 
 
 def download_taranaki(cache_dir="data/taranaki"):
@@ -197,23 +215,7 @@ def process_taranaki(
         with tarfile.open(las_archive, "r:gz") as tf:
             tf.extractall(las_dir)
 
-        children = list(las_dir.iterdir())
-        wrapper = None
-        for child in children:
-            if child.is_dir() and child != las_dir:
-                child_contents = list(child.iterdir())
-                has_las = any(f.suffix.lower() == ".las" for f in child_contents)
-                has_subdirs = any(d.is_dir() for d in child_contents)
-                if has_las or has_subdirs:
-                    wrapper = child
-                    break
-        if wrapper:
-            print(f"  Flattening wrapper directory {wrapper.name}")
-            for item in wrapper.iterdir():
-                target = las_dir / item.name
-                if not target.exists():
-                    shutil.move(str(item), str(target))
-            shutil.rmtree(wrapper)
+        _flatten_nested_las(las_dir)
 
     print(f"Parsing Taranaki LAS files from {las_dir}...")
     wells = parse_taranaki_las_files(las_dir, n_depth=n_depth, n_curves=n_curves)
