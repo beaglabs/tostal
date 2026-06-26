@@ -212,8 +212,22 @@ def process_taranaki(
             shutil.rmtree(las_dir)
         print("Extracting Taranaki LAS files...")
         las_dir.mkdir(parents=True, exist_ok=True)
-        with tarfile.open(las_archive, "r:gz") as tf:
-            tf.extractall(las_dir)
+
+        try:
+            with tarfile.open(las_archive, "r:*") as tf:
+                members = tf.getmembers()
+                las_members = [m for m in members if m.name.lower().endswith(".las")]
+                print(f"  Archive contains {len(members)} entries, {len(las_members)} LAS files")
+                if not las_members:
+                    print(f"  First 5 archive entries: {[m.name for m in members[:5]]}")
+                tf.extractall(las_dir)
+        except tarfile.ReadError:
+            print(f"  Invalid tar archive, re-downloading...")
+            las_archive.unlink()
+            cache = download_taranaki(cache_dir)
+            las_archive = cache / "taranaki_basin_well_logs.tar.gz"
+            with tarfile.open(las_archive, "r:*") as tf:
+                tf.extractall(las_dir)
 
         _flatten_nested_las(las_dir)
 
