@@ -45,6 +45,9 @@ TARANAKI_FORMATION_LITHOLOGY = {
     "Rakopi": 0,             # sandstone + coal
 }
 
+TARANAKI_LABEL_MAP = {}
+TARANAKI_LABEL_NAMES = {}
+
 
 def download_taranaki(cache_dir="data/taranaki"):
     cache = Path(cache_dir)
@@ -102,6 +105,41 @@ def _resolve_lithology_label(formation_name):
     if name in TARANAKI_FORMATION_LITHOLOGY:
         return int(TARANAKI_FORMATION_LITHOLOGY[name])
     return -1
+
+
+def _build_label_map(wells):
+    """Remap sparse global class indices to contiguous local indices.
+
+    XGBoost multi:softmax requires classes to be 0..K-1. Formation-proxy
+    labels from Taranaki are sparse (e.g. [0, 1, 2, 5, 9]), so we remap to
+    [0, 1, 2, 3, 4] and store the mapping.
+    """
+    global TARANAKI_LABEL_MAP, TARANAKI_LABEL_NAMES
+    TARANAKI_LABEL_MAP = {}
+    TARANAKI_LABEL_NAMES = {}
+
+    unique_labels = set()
+    for data in wells.values():
+        if "facies" in data:
+            arr = data["facies"].numpy()
+            valid = arr[arr >= 0]
+            unique_labels.update(valid.tolist())
+
+    sorted_labels = sorted(int(l) for l in unique_labels)
+    for local_idx, global_idx in enumerate(sorted_labels):
+        TARANAKI_LABEL_MAP[global_idx] = local_idx
+        name = FACIES_CLASSES[global_idx] if global_idx < len(FACIES_CLASSES) else f"class_{global_idx}"
+        TARANAKI_LABEL_NAMES[local_idx] = name
+
+    print(f"  Label remap: {TARANAKI_LABEL_MAP} → {dict(TARANAKI_LABEL_NAMES)}")
+
+    for data in wells.values():
+        if "facies" in data:
+            facies = data["facies"].clone().numpy()
+            remapped = np.full_like(facies, -1)
+            for global_idx, local_idx in TARANAKI_LABEL_MAP.items():
+                remapped[facies == global_idx] = local_idx
+            data["facies"] = torch.from_numpy(remapped)
 
 
 def parse_taranaki_csv(extract_dir, n_depth=512, n_curves=6, max_wells=None):
@@ -199,6 +237,8 @@ def parse_taranaki_csv(extract_dir, n_depth=512, n_curves=6, max_wells=None):
 
     total_labeled = sum(1 for w in wells.values() if "facies" in w)
     print(f"  Parsed {len(wells)} wells ({total_labeled} with formation-proxy labels)")
+
+    _build_label_map(wells)
     return wells
 
 

@@ -7,7 +7,7 @@ from .normalize_force2020 import (
     FORMATION_LITHOLOGY_PROXY,
     build_spatial_features,
 )
-from .normalize_taranaki import process_taranaki
+from .normalize_taranaki import process_taranaki, TARANAKI_LABEL_MAP, TARANAKI_LABEL_NAMES
 from .npd_core import (
     parse_lithology_from_text,
     extract_core_labels,
@@ -44,4 +44,6 @@ __all__ = [
     "load_lithos_dataset",
     "fetch_croissant_metadata",
     "inspect_dataset",
+    "TARANAKI_LABEL_MAP",
+    "TARANAKI_LABEL_NAMES",
 ]
